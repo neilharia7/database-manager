@@ -71,3 +71,14 @@ Reads the last block (page) from the file.
 - readBlock, getBlockPos, readFirstBlock, readPreviousBlock, readCurrentBlock, readNextBlock, readLastBlock: Jinzhao Qian
 - 
 - merge and test: together
+
+## Testing
+Commands to perform testing
+
+```shell
+
+cd assign1
+make
+./test_program
+make clean
+```
