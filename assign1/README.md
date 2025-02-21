@@ -76,8 +76,6 @@ Reads the last block (page) from the file.
 Commands to perform testing
 
 ```shell
-
-cd assign1
 make
 ./test_program
 make clean
