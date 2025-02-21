@@ -37,6 +37,11 @@ Our project implements a simple storage manager in C. We added functionality for
     
     Lastly, we have ensureCapacity which we use to see if the selected file has enough pages based of what we need. It will append extra pages to meet the requirements if neccessary. 
 
+## Testing
+test
+
+
+
 ## Contributions
 
 Jinzhao - Read functions
