@@ -60,6 +60,37 @@ RC forceFlushPool(BM_BufferPool *const bm);
 
 Causes all dirty pages (with fix count 0) from the buffer pool to be written to disk.
 
+### markDirty
+
+```c++
+RC markDirty(BM_BufferPool *const bm, BM_PageHandle *const page);
+```
+
+Marks a page as dirty, indicating that its contents have been modified and need to be written back to disk.
+
+### unpinPage
+
+```c++
+RC unpinPage(BM_BufferPool *const bm, BM_PageHandle *const page);
+```
+Unpins a page, reducing its fix count. If the fix count reaches zero, the page can be replaced in the buffer pool.
+
+### forcePage
+
+```c++
+RC forcePage(BM_BufferPool *const bm, BM_PageHandle *const page);
+```
+Writes the current content of the page back to the page file on disk.
+
+
+### pinPage
+```c++
+RC pinPage(BM_BufferPool *const bm, BM_PageHandle *const page, const PageNumber pageNum);
+```
+
+Pins the page with the given page number into the buffer pool. If the page is already in the pool, it is returned. Otherwise, it is read from disk.
+
+
 ## Usage
 
 To compile and test the buffer manager
