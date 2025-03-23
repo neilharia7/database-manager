@@ -3,7 +3,7 @@ CC = gcc
 CFLAGS = -g -Wall
 
 # Source files
-SRCS = buffer_mgr.c dberror.c storage_mgr.c test_assign2_1.c 
+SRCS = buffer_mgr.c buffer_mgr_stat.c dberror.c storage_mgr.c test_assign2_1.c
 
 # Object files (corresponding .o files)
 OBJS = $(SRCS:.c=.o)
