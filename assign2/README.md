@@ -102,3 +102,9 @@ make
 make clean
 
 ```
+
+Contributions
+Neil - Buffer Manager Interface Pooling & Documentation
+Brandon - Page Management
+Jinzhao - Statistic Functions
+
