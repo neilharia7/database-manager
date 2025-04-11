@@ -93,3 +93,109 @@ RC createTable(char *name, Schema *schema) {
 	free(page);
 	return RC_OK;
 }
+
+/**
+ * Function: openTable
+ * ------------------
+ * Opens an existing table for operations.
+ * This function initializes the buffer pool for the table and loads the table
+ * metadata into memory.
+ * @param rel	Table data structure to be initialized
+ * @param name	Name of the table to open
+ * @return
+ *	-	RC_OK if table opening is successful
+ *	-	Other error codes if buffer pool initialization fails
+ */
+RC openTable(RM_TableData *rel, char *name) {
+	BM_BufferPool *bm = (BM_BufferPool *)malloc(sizeof(BM_BufferPool));
+	BM_PageHandle *page = (BM_PageHandle *)malloc(sizeof(BM_PageHandle));
+	RecordManager *mgmt = (RecordManager *)malloc(sizeof(RecordManager));
+	TableMetadata *metadata;
+
+	// Initialize buffer pool with pool size 10 (assumption)
+	initBufferPool(bm, name, BUFFER_POOL_SIZE, RS_FIFO, NULL);
+
+	// Pin first page (metadata page)
+	pinPage(bm, page, 0);
+
+	// Read metadata
+	metadata = (TableMetadata *)page->data;
+
+	// Set up record manager
+	mgmt->bm = bm;
+	mgmt->page = page;
+	mgmt->currentSlot = 0;
+	// Calculates total number of records can fit in the usable space of the page
+	// + 1 -> slot occupancy flag, indicating whether a slot contains a valid record or is available (empty)
+	mgmt->totalSlots = (PAGE_SIZE - sizeof(int)) / (metadata->recordSize + 1);
+	mgmt->slotOccupied = (bool *)malloc(mgmt->totalSlots * sizeof(bool));
+
+	// Set up table data
+	rel->name = strdup(name);
+	rel->schema = createSchema(
+		metadata->schema.numAttr,
+		metadata->schema.attrNames,
+		metadata->schema.dataTypes,
+		metadata->schema.typeLength,
+		metadata->schema.keySize,
+		metadata->schema.keyAttrs
+	);
+	rel->mgmtData = mgmt;
+
+	// Unpin metadata page
+	unpinPage(bm, page);
+
+	return RC_OK;
+}
+
+/**
+ * Function: closeTable
+ * -------------------
+ * Closes a previously opened table.
+ * This function shuts down the buffer pool associated with the table and
+ * nukes all memory allocated for table management.
+ *
+ * @param rel	Table data structure to close
+ * @return
+ *	-	RC_OK if table closing is successful
+ */
+RC closeTable(RM_TableData *rel) {
+	RecordManager *mgmt = (RecordManager *)rel->mgmtData;
+
+	// Force write any dirty pages
+	forceFlushPool(mgmt->bm);
+
+	// Shutdown buffer pool
+	shutdownBufferPool(mgmt->bm);
+
+	// Free allocated memory
+	free(mgmt->slotOccupied);
+	free(mgmt->page);
+	free(mgmt->bm);
+	free(mgmt);
+	freeSchema(rel->schema);
+	free(rel->name);
+
+	rel->mgmtData = NULL;
+
+	return RC_OK;
+}
+
+/**
+ * Function: deleteTable
+ * --------------------
+ * Deletes a table and its associated page file.
+ * This function removes the page file that stores the table data.
+ *
+ * @param name	Name of the table to delete
+ * @return
+ *	-	RC_OK if table (page) deletion is successful
+ *	-	RC_FILE_NOT_FOUND if the table does not exist
+ */
+RC deleteTable(char *name) {
+	if (name == NULL) {
+		return RC_INVALID_PARAM;
+	}
+	// Simply delete the page file
+	return destroyPageFile(name);
+}
