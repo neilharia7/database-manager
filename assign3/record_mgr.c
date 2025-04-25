@@ -68,7 +68,7 @@ RC shutdownRecordManager() {
  */
 RC createTable(char *name, Schema *schema) {
 	SM_FileHandle fileHandle;
-	char *page = malloc(PAGE_SIZE);
+	char *page = calloc(PAGE_SIZE, 1);
 	TableMetadata metadata;
 	int recordSize = getRecordSize(schema);
 
