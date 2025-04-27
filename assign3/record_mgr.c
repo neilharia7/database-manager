@@ -66,7 +66,7 @@ RC shutdownRecordManager() {
  */
 RC createTable(char *name, Schema *schema) {
 	SM_FileHandle fHandle;
-	RC rc;
+	RC rc = 0;
 
 	// Create a new page file for the table
 	if ((rc = createPageFile(name)) != RC_OK)
@@ -208,12 +208,8 @@ RC openTable(RM_TableData *rel, char *name) {
 	rel->schema = schema;
 
 	// Unpin the metadata page after reading
-	if ((rc = unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle)) != RC_OK) {
-		return rc;
-	}
-	return RC_OK;
+	return unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
 }
-
 
 /**
  * Function: closeTable
@@ -225,8 +221,7 @@ RC openTable(RM_TableData *rel, char *name) {
  *	-	Other error codes if buffer pool shutdown fails
  */
 RC closeTable(RM_TableData *rel) {
-	RC rc;
-	SM_FileHandle fHandle;
+	RC rc = -1;
 	RMTableMgmtData *tableMgmtData = rel->mgmtData;
 
 	// Pin the metadata page to update number of tuples
@@ -505,4 +500,433 @@ RC getRecord(RM_TableData *rel, RID id, Record *record) {
 
 	// Unpin the page
 	return unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+}
+
+
+/**
+ * Function: startScan
+ * ------------------
+ * Initializes a scan operation on the table.
+ * This function sets up the scan handle with the necessary data to perform
+ * a sequential scan of the table records, optionally filtering by a condition.
+ *
+ * @param rel       Table data structure to scan
+ * @param scan      Scan handle to be initialized
+ * @param cond      Expression condition to filter records (can be NULL for all records)
+ * @return
+ *  -   RC_OK if scan initialization is successful
+ */
+RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond) {
+	// Set the relation for the scan
+	scan->rel = rel;
+
+	// Allocate and initialize scan management data
+	RMScanMgmtData *rmScanMgmtData = (RMScanMgmtData *) malloc(sizeof(RMScanMgmtData));
+
+	// Initialize scan to start at the first data page (page 2) and first slot
+	rmScanMgmtData->rid.page = 2;
+	rmScanMgmtData->rid.slot = 0;
+	rmScanMgmtData->count = 0;
+	rmScanMgmtData->condition = cond;
+
+	// Attach management data to scan handle
+	scan->mgmtData = rmScanMgmtData;
+
+	return RC_OK;
+}
+
+/**
+ * Function: next
+ * -------------
+ * Retrieves the next record that satisfies the scan condition.
+ * This function iterates through table records, evaluating each against
+ * the scan condition until a match is found or the end of table is reached.
+ *
+ * @param scan      Scan handle containing scan state information
+ * @param record    Record structure to populate with the next matching record
+ * @return
+ *  -   RC_OK if a matching record is found
+ *  -   RC_RM_NO_MORE_TUPLES if no more matching records exist
+ */
+RC next(RM_ScanHandle *scan, Record *record) {
+	RMScanMgmtData *scanMgmtData = (RMScanMgmtData *) scan->mgmtData;
+	RMTableMgmtData *tmt = (RMTableMgmtData *) scan->rel->mgmtData;
+
+	Value *result = (Value *) malloc(sizeof(Value));
+	static char *data;
+
+	int recordSize = tmt->recordSize + 1;
+	int totalSlots = floor(PAGE_SIZE/recordSize);
+
+	// Return early if table is empty
+	if (tmt->numTuples == 0)
+		return RC_RM_NO_MORE_TUPLES;
+
+	// Scan through records until we find a match or reach the end
+	while (scanMgmtData->count <= tmt->numTuples) {
+		// Initialize scan position if this is the first call
+		if (scanMgmtData->count <= 0) {
+			scanMgmtData->rid.page = 2;
+			scanMgmtData->rid.slot = 0;
+
+			pinPage(&tmt->bufferPool, &scanMgmtData->pHandle, scanMgmtData->rid.page);
+			data = scanMgmtData->pHandle.data;
+		} else {
+			// Move to next slot
+			scanMgmtData->rid.slot++;
+
+			// If we've reached the end of the page, move to next page
+			if (scanMgmtData->rid.slot >= totalSlots) {
+				scanMgmtData->rid.slot = 0;
+				scanMgmtData->rid.page++;
+			}
+
+			pinPage(&tmt->bufferPool, &scanMgmtData->pHandle, scanMgmtData->rid.page);
+			data = scanMgmtData->pHandle.data;
+		}
+
+		// Calculate address of record data (skip marker byte)
+		data = data + (scanMgmtData->rid.slot * recordSize) + 1;
+
+		// Set record ID
+		record->id.page = scanMgmtData->rid.page;
+		record->id.slot = scanMgmtData->rid.slot;
+		scanMgmtData->count++;
+
+		// Copy record data
+		memcpy(record->data, data, recordSize-1);
+
+		// Evaluate condition if one exists
+		if (scanMgmtData->condition != NULL) {
+			evalExpr(record, (scan->rel)->schema, scanMgmtData->condition, &result);
+		} else {
+			result->v.boolV = TRUE; // When no condition, return all records
+		}
+
+		// If condition is satisfied, return the record
+		if (result->v.boolV == TRUE) {
+			unpinPage(&tmt->bufferPool, &scanMgmtData->pHandle);
+			return RC_OK;
+		} else {
+			unpinPage(&tmt->bufferPool, &scanMgmtData->pHandle);
+		}
+	}
+
+	// Reset scan position for next scan
+	scanMgmtData->rid.page = 2;
+	scanMgmtData->rid.slot = 0;
+	scanMgmtData->count = 0;
+	return RC_RM_NO_MORE_TUPLES;
+}
+
+/**
+ * Function: closeScan
+ * ------------------
+ * Closes a scan operation and frees associated resources.
+ * This function unpins any pinned pages and frees the scan management data.
+ *
+ * @param scan      Scan handle to be closed
+ * @return
+ *  -   RC_OK if scan is successfully closed
+ */
+RC closeScan(RM_ScanHandle *scan) {
+	RMScanMgmtData *rmScanMgmtData = (RMScanMgmtData *) scan->mgmtData;
+	RMTableMgmtData *rmTableMgmtData = (RMTableMgmtData *) scan->rel->mgmtData;
+
+	// Unpin page if scan was active
+	if (rmScanMgmtData->count > 0) {
+		unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+	}
+
+	// Free scan management data
+	free(scan->mgmtData);
+	scan->mgmtData = NULL;
+	return RC_OK;
+}
+
+/**
+ * Function: getRecordSize
+ * ----------------------
+ * Calculates the size of a record based on the schema.
+ * This function sums up the size of each attribute based on its data type.
+ *
+ * @param schema	Schema defining the record structure
+ * @return
+ *  -   Total size of the record in bytes
+ */
+int getRecordSize(Schema *schema) {
+	int size = 0;
+
+	// Calculate size based on each attribute's data type
+	for (int i = 0; i < schema->numAttr; ++i) {
+		switch (schema->dataTypes[i]) {
+			case DT_STRING:
+				size += schema->typeLength[i];
+			break;
+			case DT_INT:
+				size += sizeof(int);
+			break;
+			case DT_FLOAT:
+				size += sizeof(float);
+			break;
+			case DT_BOOL:
+				size += sizeof(bool);
+			break;
+			default:
+				break;
+		}
+	}
+	return size;
+}
+
+/**
+ * Function: createSchema
+ * ---------------------
+ * Creates a new schema with the given attributes.
+ * This function allocates memory for the schema and initializes its fields.
+ *
+ * @param numAttr       Number of attributes in the schema
+ * @param attrNames     Array of attribute names
+ * @param dataTypes     Array of attribute data types
+ * @param typeLength    Array of attribute type lengths (for strings)
+ * @param keySize       Number of key attributes
+ * @param keys          Array of key attribute indices
+ * @return
+ *  -   Pointer to the newly created schema
+ */
+Schema *createSchema(int numAttr, char **attrNames, DataType *dataTypes, int *typeLength, int keySize, int *keys) {
+	Schema *schema = malloc(sizeof(Schema));
+
+	// Initialize schema fields
+	schema->numAttr = numAttr;
+	schema->attrNames = attrNames;
+	schema->dataTypes = dataTypes;
+	schema->typeLength = typeLength;
+	schema->keySize = keySize;
+	schema->keyAttrs = keys;
+
+	return schema;
+}
+
+/**
+ * Function: freeSchema
+ * -------------------
+ * Frees memory allocated for a schema.
+ * This function releases all memory associated with the schema,
+ * including attribute names, data types, type lengths, and key attributes.
+ *
+ * @param schema    Schema to be freed
+ * @return
+ *  -   RC_OK if schema is successfully freed
+ */
+RC freeSchema(Schema *schema) {
+	if (schema) {
+		// Free attribute names
+		if (schema->attrNames) {
+			for (int i = 0; i < schema->numAttr; i++) {
+				if (schema->attrNames[i]) free(schema->attrNames[i]);
+			}
+			free(schema->attrNames);
+		}
+
+		// Free other schema components
+		if (schema->dataTypes) free(schema->dataTypes);
+		if (schema->typeLength) free(schema->typeLength);
+		if (schema->keyAttrs) free(schema->keyAttrs);
+
+		// Free schema structure itself
+		free(schema);
+	}
+	return RC_OK;
+}
+
+/**
+ * Function: createRecord
+ * ---------------------
+ * Creates a new record based on the given schema.
+ * This function allocates memory for the record and initializes its fields.
+ *
+ * @param record    Pointer to store the newly created record
+ * @param schema    Schema defining the record structure
+ * @return
+ *  -   RC_OK if record is successfully created
+ */
+RC createRecord(Record **record, Schema *schema) {
+	int recordSize = getRecordSize(schema);
+
+	// Allocate memory for record
+	Record *newRecord = (Record *) malloc(sizeof(Record));
+	newRecord->data = (char *) malloc(recordSize);
+
+	// Initialize record ID to invalid values
+	newRecord->id.page = -1;
+	newRecord->id.slot = -1;
+
+	// Set output parameter
+	*record = newRecord;
+
+	return RC_OK;
+}
+
+/**
+ * Function: freeRecord
+ * -------------------
+ * Frees memory allocated for a record.
+ * This function releases all memory associated with the record.
+ *
+ * @param record    Record to be freed
+ * @return
+ *  -   RC_OK if record is successfully freed
+ */
+RC freeRecord(Record *record) {
+	if (record) {
+		// Free record data
+		free(record->data);
+
+		// Free record structure itself
+		free(record);
+	}
+	return RC_OK;
+}
+
+/**
+ * Function: determineAttributeOffsetInRecord
+ * ----------------------------------------
+ * Calculates the byte offset of an attribute within a record.
+ * This function computes the offset by summing the sizes of all
+ * preceding attributes in the schema.
+ *
+ * @param schema    Schema defining the record structure
+ * @param attrNum   Index of the attribute to find
+ * @param result    Pointer to store the calculated offset
+ * @return
+ *  -   RC_OK if offset is successfully calculated
+ */
+RC determineAttributeOffsetInRecord(Schema *schema, int attrNum, int *result) {
+	int offset = 0;
+	int attrPos = 0;
+
+	// Sum sizes of all attributes before the target attribute
+	for (attrPos = 0; attrPos < attrNum; attrPos++) {
+		switch (schema->dataTypes[attrPos]) {
+			case DT_STRING:
+				offset += schema->typeLength[attrPos];
+			break;
+			case DT_INT:
+				offset += sizeof(int);
+			break;
+			case DT_FLOAT:
+				offset += sizeof(float);
+			break;
+			case DT_BOOL:
+				offset += sizeof(bool);
+			break;
+		}
+	}
+
+	// Store result
+	*result = offset;
+	return RC_OK;
+}
+
+/**
+ * Function: getAttr
+ * ----------------
+ * Retrieves an attribute value from a record.
+ * This function locates the attribute within the record using its offset
+ * and copies its value into a newly allocated Value structure.
+ *
+ * @param record    Record to retrieve attribute from
+ * @param schema    Schema defining the record structure
+ * @param attrNum   Index of the attribute to retrieve
+ * @param value     Pointer to store the retrieved value
+ * @return
+ *  -   RC_OK if attribute is successfully retrieved
+ */
+RC getAttr(Record *record, Schema *schema, int attrNum, Value **value) {
+	int offset = 0;
+
+	// Calculate attribute offset
+	determineAttributeOffsetInRecord(schema, attrNum, &offset);
+
+	// Allocate memory for value
+	Value *tempValue = (Value *) malloc(sizeof(Value));
+
+	// Get pointer to attribute data
+	char *string = record->data;
+	string += offset;
+
+	// Extract value based on data type
+	switch (schema->dataTypes[attrNum]) {
+		case DT_INT:
+			memcpy(&(tempValue->v.intV), string, sizeof(int));
+		tempValue->dt = DT_INT;
+		break;
+		case DT_STRING:
+			tempValue->dt = DT_STRING;
+		int len = schema->typeLength[attrNum];
+		tempValue->v.stringV = (char *) malloc(len + 1);
+		strncpy(tempValue->v.stringV, string, len);
+		tempValue->v.stringV[len] = '\0';
+		break;
+		case DT_FLOAT:
+			tempValue->dt = DT_FLOAT;
+		memcpy(&(tempValue->v.floatV), string, sizeof(float));
+		break;
+		case DT_BOOL:
+			tempValue->dt = DT_BOOL;
+		memcpy(&(tempValue->v.boolV), string, sizeof(bool));
+		break;
+	}
+
+	// Set output parameter
+	*value = tempValue;
+	return RC_OK;
+}
+
+/**
+ * It sets the attributes of the record to the value passed for the attribute determined by "attrNum"
+                1) It uses "determineAttributOffsetInRecord" for determining the offset at which the attibute is stored
+                2) It uses the attribute type to write the new value at the offset determined above
+                3) Once the attribute is set, RC_OK is returned
+ * @param record
+ * @param schema
+ * @param attrNum
+ * @param value
+ * @return
+ */
+RC setAttr(Record *record, Schema *schema, int attrNum, Value *value) {
+	int offset = 0;
+
+	// Calculate attribute offset
+	determineAttributeOffsetInRecord(schema, attrNum, &offset);
+
+	// Get pointer to attribute data
+	char *data = record->data;
+	data = data + offset;
+
+	// Set value based on data type
+	switch (schema->dataTypes[attrNum]) {
+		case DT_INT:
+			*(int *) data = value->v.intV;
+		break;
+		case DT_STRING: {
+			char *buf;
+			int len = schema->typeLength[attrNum];
+			buf = (char *) malloc(len + 1);
+			strncpy(buf, value->v.stringV, len);
+			buf[len] = '\0';
+			strncpy(data, buf, len);
+			free(buf);
+		}
+		break;
+		case DT_FLOAT:
+			*(float *) data = value->v.floatV;
+		break;
+		case DT_BOOL:
+			*(bool *) data = value->v.boolV;
+		break;
+	}
+
+	return RC_OK;
 }
