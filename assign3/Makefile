@@ -3,13 +3,13 @@ CC = gcc
 CFLAGS = -g -Wall
 
 # Source files
-SRCS = record_mgr.c expr.c rm_serializer.c buffer_mgr.c buffer_mgr_stat.c dberror.c storage_mgr.c test_assign3_1.c test_expr.c
+SRCS = record_mgr.c expr.c rm_serializer.c buffer_mgr.c buffer_mgr_stat.c dberror.c storage_mgr.c test_assign3_1.c
 
 # Object files (corresponding .o files)
 OBJS = $(SRCS:.c=.o)
 
 # Output executable
-EXEC = test_program_2
+EXEC = test_program_3
 
 # Default target: build everything
 all: $(EXEC)
