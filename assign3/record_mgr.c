@@ -1,57 +1,55 @@
-#include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
+#include <tgmath.h>
 #include "record_mgr.h"
 #include "buffer_mgr.h"
 #include "storage_mgr.h"
 
 
-// Metadata of table stored at the beginning of the first page
-typedef struct TableMetadata {
-	int numTuples;          // Number of records in the table
-	int firstFreePage;      // First page with free space
-	int numPages;           // Total number of pages in the table
-	int recordSize;         // Size of each record in bytes
-	Schema schema;          // Schema of the table
-} TableMetadata;
+// Structure to manage table metadata and buffer pool
+typedef struct RMTableMgmtData {
 
-typedef struct RecordManager {
-	BM_BufferPool *bm;      // Buffer pool for the table
-	BM_PageHandle *page;    // Current page being used
-	int currentSlot;        // Current slot being used
-	bool *slotOccupied;     // Array to track occupied slots
-	int scanCount;          // Number of records scanned
-	Expr *scanCondition;    // Condition for scan
-	int totalSlots;         // Total slots per page
-} RecordManager;
+	int numTuples;	// Number of tuples (records) in the table
+	int firstFreePageNumber;	// First free page number for inserting new records
+	int recordSize;	// Size of each record in bytes
+	BM_PageHandle pageHandle;	// Buffer manager page handle for metadata operations
+	BM_BufferPool bufferPool;	// Buffer pool for managing table pages
+} RMTableMgmtData;
+
+/* RMScanMgmtData stores scan details and condition */
+typedef struct RMScanMgmtData {
+
+	BM_PageHandle pHandle;
+	RID rid; // current row that is being scanned
+	int count; // no. of tuples scanned till now
+	Expr *condition; // expression to be checked
+
+} RMScanMgmtData;
 
 /**
  * Function: initRecordManager
  * ---------------------------
- * Initializes the record manager.
- * This function sets up the necessary data structures and initializes the underlying
- * storage manager to prepare the system for record operations.
- *
- * @param mgmtData	TODO add info
+ * Initializes the record manager. Nothing more.
+ * @param mgmtData
  * @return
  *	-	RC_OK if initialization is successful
  */
-RC initRecordManager(void *mgmtData) {
-	// Initialize storage manager
-	initStorageManager();
+RC initRecordManager(void * mgmtData) {
+	// No initialization required for this implementation
 	return RC_OK;
 }
 
 /**
  * Function: shutdownRecordManager
  * ------------------------------
- * Shuts down the record manager and frees all associated resources.
+ * Shuts down the record manager
  * This function is called when the record manager is no longer needed.
- * TODO
  * @return
  *	-	RC_OK if shutdown is successful
  */
+
 RC shutdownRecordManager() {
-	// TODO
 	return RC_OK;
 }
 
@@ -67,30 +65,66 @@ RC shutdownRecordManager() {
  *	-	RC_OK if table creation is successful
  */
 RC createTable(char *name, Schema *schema) {
-	SM_FileHandle fileHandle;
-	char *page = calloc(PAGE_SIZE, 1);
-	TableMetadata metadata;
-	int recordSize = getRecordSize(schema);
+	SM_FileHandle fHandle;
+	RC rc;
 
-	// Initialize metadata
-	metadata.numTuples = 0;
-	metadata.firstFreePage = 1; // First page after metadata
-	metadata.numPages = 1;      // Start with one page (metadata page)
-	metadata.recordSize = recordSize;
+	// Create a new page file for the table
+	if ((rc = createPageFile(name)) != RC_OK)
+		return rc;
 
-	// Copy schema to metadata
-	metadata.schema = *schema;
+	// Open the newly created page file
+	if ((rc = openPageFile(name, &fHandle)) != RC_OK)
+		return rc;
 
-	// Write metadata to first page
-	memcpy(page, &metadata, sizeof(TableMetadata));
+	// Buffer to hold metadata to be written to the first page
+	char data[PAGE_SIZE];
+	char *metaData = data;
+	memset(metaData, 0, PAGE_SIZE);
 
-	// Create file with given name and write first page
-	createPageFile(name);
-	openPageFile(name, &fileHandle);
-	writeBlock(0, &fileHandle, page);
-	closePageFile(&fileHandle);
+	// Write number of tuples (initially 0)
+	*(int *) metaData = 0;
+	metaData += sizeof(int);
 
-	free(page);
+	// Write first free page number (page 2, since page 0 is metadata, page 1 is for schema/metadata)
+	*(int *) metaData = 2;
+	metaData += sizeof(int);
+
+	// Write record size (computed from schema)
+	*(int *) metaData = getRecordSize(schema);
+	metaData += sizeof(int);
+
+	// Write number of attributes in the schema
+	*(int *) metaData = schema->numAttr;
+	metaData += sizeof(int);
+
+	// Write schema attribute information for each attribute
+	for (int i = 0; i < schema->numAttr; i++) {
+		// Assuming max field name is 20
+		strncpy(metaData, schema->attrNames[i], 20);
+		metaData += 20;
+
+		// Write attribute data type (as integer)
+		*(int *) metaData = (int) schema->dataTypes[i];
+		metaData += sizeof(int);
+
+		// Write attribute type length (for strings, etc.)
+		*(int *) metaData = (int) schema->typeLength[i];
+		metaData += sizeof(int);
+	}
+
+	// Write key attribute indices (for primary key)
+	for (int i = 0; i < schema->keySize; i++) {
+		*(int *) metaData = schema->keyAttrs[i];
+		metaData += sizeof(int);
+	}
+
+	// Write the metadata buffer to page 1 of the file
+	if ((rc = writeBlock(1, &fHandle, data)) != RC_OK)
+		return rc;
+
+	if ((rc = closePageFile(&fHandle)) != RC_OK)
+		return rc;
+
 	return RC_OK;
 }
 
@@ -107,77 +141,115 @@ RC createTable(char *name, Schema *schema) {
  *	-	Other error codes if buffer pool initialization fails
  */
 RC openTable(RM_TableData *rel, char *name) {
-	BM_BufferPool *bm = (BM_BufferPool *)malloc(sizeof(BM_BufferPool));
-	BM_PageHandle *page = (BM_PageHandle *)malloc(sizeof(BM_PageHandle));
-	RecordManager *mgmt = (RecordManager *)malloc(sizeof(RecordManager));
-	TableMetadata *metadata;
+	RC rc = 0;
 
-	// Initialize buffer pool with pool size 10 (assumption)
-	initBufferPool(bm, name, BUFFER_POOL_SIZE, RS_FIFO, NULL);
+	// Allocate memory for schema and table management data
+	Schema *schema = (Schema *) malloc(sizeof(Schema));
+	RMTableMgmtData *tableMgmtData = (RMTableMgmtData *) malloc(sizeof(RMTableMgmtData));
+	rel->mgmtData = tableMgmtData;
+	rel->name = name;
 
-	// Pin first page (metadata page)
-	pinPage(bm, page, 0);
+	// Initialize buffer pool for the table (using LRU replacement strategy, 10 pages)
+	if ((rc = initBufferPool(&tableMgmtData->bufferPool, name, 10, RS_LRU, NULL)) != RC_OK) {
+		return rc;
+	}
+	// Pin the metadata page (page 1) to read table metadata
+	if ((rc = pinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle, 1)) != RC_OK) {
+		// pinning the 0th page which has metadata
+		return rc;
+	}
+	SM_PageHandle metaData = (char *) tableMgmtData->pageHandle.data;
 
-	// Read metadata
-	metadata = (TableMetadata *)page->data;
+	/**
+	 * Read
+	 *	number of tuples
+	 *	first free page number
+	 *	record size
+	 *	number of attributes
+	 * from metadata
+	 */
+	tableMgmtData->numTuples = *(int *) metaData;
+	metaData += sizeof(int);
+	tableMgmtData->firstFreePageNumber = *(int *) metaData;
+	metaData += sizeof(int);
+	tableMgmtData->recordSize = *(int *) metaData;
+	metaData += sizeof(int);
+	schema->numAttr = *(int *) metaData;
+	metaData += sizeof(int);
 
-	// Set up record manager
-	mgmt->bm = bm;
-	mgmt->page = page;
-	mgmt->currentSlot = 0;
-	// Calculates total number of records can fit in the usable space of the page
-	// + 1 -> slot occupancy flag, indicating whether a slot contains a valid record or is available (empty)
-	mgmt->totalSlots = (PAGE_SIZE - sizeof(int)) / (metadata->recordSize + 1);
-	mgmt->slotOccupied = (bool *)malloc(mgmt->totalSlots * sizeof(bool));
+	// Allocate memory for schema attribute arrays
+	schema->attrNames = (char **) malloc(sizeof(char *) * schema->numAttr);
+	schema->dataTypes = (DataType *) malloc(sizeof(DataType) * schema->numAttr);
+	schema->typeLength = (int *) malloc(sizeof(int) * schema->numAttr);
 
-	// Set up table data
-	rel->name = strdup(name);
-	rel->schema = createSchema(
-		metadata->schema.numAttr,
-		metadata->schema.attrNames,
-		metadata->schema.dataTypes,
-		metadata->schema.typeLength,
-		metadata->schema.keySize,
-		metadata->schema.keyAttrs
-	);
-	rel->mgmtData = mgmt;
+	// Read attribute information for each attribute
+	for (int i = 0; i < schema->numAttr; i++) {
+		// (max 20 bytes + null terminator)
+		schema->attrNames[i] = (char *) malloc(21);
+		strncpy(schema->attrNames[i], metaData, 20);
+		schema->attrNames[i][20] = '\0';	// -> null termination
+		metaData += 20;
 
-	// Unpin metadata page
-	unpinPage(bm, page);
+		schema->dataTypes[i] = *(int *) metaData;
+		metaData += sizeof(int);
 
+		schema->typeLength[i] = *(int *) metaData;
+		metaData += sizeof(int);
+	}
+	schema->keySize = *(int *) metaData;
+	metaData += sizeof(int);
+
+	// Allocate memory for key attributes (primary key)
+	schema->keyAttrs = (int *) malloc(sizeof(int) * schema->keySize);
+	for (int i = 0; i < schema->keySize; i++) {
+		schema->keyAttrs[i] = *(int *) metaData;
+		metaData += sizeof(int);
+	}
+	rel->schema = schema;
+
+	// Unpin the metadata page after reading
+	if ((rc = unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle)) != RC_OK) {
+		return rc;
+	}
 	return RC_OK;
 }
 
+
 /**
  * Function: closeTable
- * -------------------
- * Closes a previously opened table.
- * This function shuts down the buffer pool associated with the table and
- * nukes all memory allocated for table management.
- *
- * @param rel	Table data structure to close
+ * ------------------
+ * Closes an open table, writing back any updated metadata and shutting down the buffer pool.
+ * @param rel	Table data structure to be closed
  * @return
  *	-	RC_OK if table closing is successful
+ *	-	Other error codes if buffer pool shutdown fails
  */
 RC closeTable(RM_TableData *rel) {
-	RecordManager *mgmt = (RecordManager *)rel->mgmtData;
+	RC rc;
+	SM_FileHandle fHandle;
+	RMTableMgmtData *tableMgmtData = rel->mgmtData;
 
-	// Force write any dirty pages
-	forceFlushPool(mgmt->bm);
+	// Pin the metadata page to update number of tuples
+	if ((rc == pinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle, 1)) != RC_OK)
+		return rc;
 
-	// Shutdown buffer pool
-	shutdownBufferPool(mgmt->bm);
+	char *metaData = tableMgmtData->pageHandle.data;
+	// Update number of tuples in metadata
+	*(int *) metaData = tableMgmtData->numTuples;
 
-	// Free allocated memory
-	free(mgmt->slotOccupied);
-	free(mgmt->page);
-	free(mgmt->bm);
-	free(mgmt);
-	freeSchema(rel->schema);
-	free(rel->name);
+	// Mark the metadata page as dirty (modified)
+	markDirty(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
 
+	// Unpin the metadata page after updating
+	if ((rc = unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle)) != RC_OK)
+		return rc;
+
+	// Shutdown the buffer pool for the table
+	if ((rc = shutdownBufferPool(&tableMgmtData->bufferPool)) != RC_OK)
+		return rc;
+
+	// Clear management data pointer
 	rel->mgmtData = NULL;
-
 	return RC_OK;
 }
 
@@ -190,12 +262,28 @@ RC closeTable(RM_TableData *rel) {
  * @param name	Name of the table to delete
  * @return
  *	-	RC_OK if table (page) deletion is successful
- *	-	RC_FILE_NOT_FOUND if the table does not exist
+ *	-	Other error codes if destroyPageFile fails
  */
 RC deleteTable(char *name) {
-	if (name == NULL) {
-		return RC_INVALID_PARAM;
-	}
-	// Simply delete the page file
+	// Destroy the page file associated with the table
 	return destroyPageFile(name);
 }
+
+/**
+ * Function: getNumTuples
+ * ---------------------
+ * Returns the total number of records present in the table.
+ * This value is fetched from the table management data.
+ *
+ * Parameters:
+ *   rel - Table data structure
+ *
+ * Returns:
+ *   The number of tuples (records) in the table
+ */
+int getNumTuples(RM_TableData *rel) {
+
+	RMTableMgmtData *rmTableMgmtData = rel->mgmtData;
+	return rmTableMgmtData->numTuples;
+}
+
