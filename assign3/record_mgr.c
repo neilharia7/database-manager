@@ -275,11 +275,9 @@ RC deleteTable(char *name) {
  * Returns the total number of records present in the table.
  * This value is fetched from the table management data.
  *
- * Parameters:
- *   rel - Table data structure
- *
- * Returns:
- *   The number of tuples (records) in the table
+ * @param rel	Table data structure
+ * @return
+ *	-	The number of tuples (records) in the table
  */
 int getNumTuples(RM_TableData *rel) {
 
@@ -287,3 +285,224 @@ int getNumTuples(RM_TableData *rel) {
 	return rmTableMgmtData->numTuples;
 }
 
+/**
+ * Function: insertRecord
+ * ---------------------
+ * Inserts a new record into the table.
+ * Pins the first free page where records can be inserted
+ * Checks if there is enough space in this page to insert the record
+ * If not, it moves to the next page to find a free slot
+ * Writes the new record at the free slot and updates RID information
+ * Marks the page as dirty
+ * Unpins the page
+ * Increments the number of tuples
+ *
+ * @param rel	Table data structure
+ * @param record	Record to be inserted
+ * @return
+ *	-	RC_OK - If record insertion is successful
+ */
+RC insertRecord(RM_TableData *rel, Record *record) {
+    RMTableMgmtData *tableMgmtData = rel->mgmtData;
+    int recordSize = tableMgmtData->recordSize + 1;
+    RID *rid = &record->id;
+    rid->page = tableMgmtData->firstFreePageNumber;
+    rid->slot = -1;
+
+    // Pin the first free page
+    RC rc = pinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle, rid->page);
+    if (rc != RC_OK) {
+        return rc;
+    }
+
+    char *data = tableMgmtData->pageHandle.data;
+
+    // Calculate total slots per page
+    int totalSlots = floor(PAGE_SIZE / recordSize);
+
+    // Find a free slot in the current page
+    for (int i = 0; i < totalSlots; i++) {
+        if (data[i * recordSize] != '#') {
+            rid->slot = i;
+            break;
+        }
+    }
+
+    // If no free slot found in current page, search in subsequent pages
+    while (rid->slot == -1) {
+        unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
+        rid->page++; // Increment page number
+
+        rc = pinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle, rid->page);
+        if (rc != RC_OK) {
+            return rc;
+        }
+
+        data = tableMgmtData->pageHandle.data;
+
+        for (int i = 0; i < totalSlots; i++) {
+            if (data[i * recordSize] != '#') {
+                tableMgmtData->firstFreePageNumber = rid->page;
+                rid->slot = i;
+                break;
+            }
+        }
+    }
+
+    // Mark the page as dirty
+    rc = markDirty(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
+    if (rc != RC_OK) {
+        unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
+        return rc;
+    }
+
+    // Write record to the slot
+    char *slotAddress = data + (rid->slot * recordSize);
+    *slotAddress = '#'; // Mark slot as occupied
+    slotAddress++;
+    memcpy(slotAddress, record->data, recordSize - 1);
+
+    // Unpin the page
+    rc = unpinPage(&tableMgmtData->bufferPool, &tableMgmtData->pageHandle);
+    if (rc != RC_OK) {
+        return rc;
+    }
+
+    // Update tuple count and record ID
+    tableMgmtData->numTuples++;
+    record->id = *rid;
+
+    return RC_OK;
+}
+
+/**
+ * Function: deleteRecord
+ * ---------------------
+ * Deletes a record from the table.
+ * Pins the page where records is located
+ * Marks the record as deleted by replacing "#" with "$" (tombstone)
+ * Decrements the number of tuples
+ * Marks the page as dirty
+ * Unpins the page
+ *
+ * @param rel	Table data structure
+ * @param id	Record to be inserted
+ * @return
+ *	-	RC_OK - If record deletion is successful
+ */
+RC deleteRecord(RM_TableData *rel, RID id) {
+	RMTableMgmtData *rmTableMgmtData = rel->mgmtData;
+
+	// Pin the page containing the record
+	RC rc = pinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle, id.page);
+	if (rc != RC_OK) {
+		return rc;
+	}
+
+	// Update number of tuples
+	rmTableMgmtData->numTuples--;
+
+	// Calculate record size and slot address
+	int recordSize = rmTableMgmtData->recordSize + 1;
+	char *data = rmTableMgmtData->pageHandle.data;
+	char *slotAddress = data + (id.slot * recordSize);
+
+	// Set tombstone '$' for deleted record
+	*slotAddress = '$';
+
+	// Mark the page as dirty and unpin
+	rc = markDirty(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+	if (rc != RC_OK) {
+		unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+		return rc;
+	}
+
+	rc = unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+	return rc;
+}
+
+/**
+ * Function: updateRecord
+ * ---------------------
+ * Updates an existing record in the table.
+ * Pins the page where the record is located
+ * Finds the slot in the page where the record is stored
+ * Updates the record data at that location
+ * Marks the page as dirty
+ * Unpins the page
+ *
+ * @param rel	Table data structure
+ * @param record	Record to be inserted
+ * @return
+ *	-	RC_OK - If record insertion is successful
+ */
+RC updateRecord(RM_TableData *rel, Record *record) {
+	RMTableMgmtData *rmTableMgmtData = rel->mgmtData;
+
+	// Pin the page containing the record
+	RC rc = pinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle, record->id.page);
+	if (rc != RC_OK) {
+		return rc;
+	}
+
+	// Calculate record size and data address
+	int recordSize = rmTableMgmtData->recordSize + 1;
+	char *data = rmTableMgmtData->pageHandle.data;
+	char *recordAddress = data + (record->id.slot * recordSize) + 1; // +1 to skip the marker
+
+	// Update record data
+	memcpy(recordAddress, record->data, recordSize - 1);
+
+	// Mark the page as dirty
+	if ((rc = markDirty(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle)) != RC_OK) {
+		unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+		return rc;
+	}
+
+	// Unpin the page
+	return unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+}
+
+/**
+ * Function: getRecord
+ * ------------------
+ * Retrieves a record from the table.
+ * Validates the input parameters
+ * Pins the page containing the record
+ * Locates the record using the slot ID
+ * Checks if the record exists (marked with "#")
+ * Copies the record data to the provided record structure
+ * Unpins the page
+ *
+ * @param rel	Table data structure
+ * @param id	Record ID to retrieve
+ * @param record	Record to be inserted
+ * @return
+ *	-	RC_OK - If record insertion is successful
+ */
+RC getRecord(RM_TableData *rel, RID id, Record *record) {
+	RC rc;
+	RMTableMgmtData *rmTableMgmtData = rel->mgmtData;
+
+	// Pin the page containing the record
+	if ((rc = pinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle, id.page)) != RC_OK) {
+		return rc;
+	}
+
+	// Calculate record size and slot address
+	int recordSize = rmTableMgmtData->recordSize + 1;
+	char *recordSlotAddress = rmTableMgmtData->pageHandle.data + (id.slot * recordSize);
+
+	// Check if record exists (marked with "#")
+	if (*recordSlotAddress != '#') {
+		unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+		return RC_TUPLE_WIT_RID_ON_EXISTING;
+	}
+
+	// Copy record data to the provided record structure
+	memcpy(record->data, recordSlotAddress + 1, recordSize - 1);
+	record->id = id;
+
+	// Unpin the page
+	return unpinPage(&rmTableMgmtData->bufferPool, &rmTableMgmtData->pageHandle);
+}
