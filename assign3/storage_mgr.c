@@ -32,7 +32,6 @@ void initStorageManager(void) {
  *
  * Returns:
  *   RC_FILE_ALREADY_EXISTING - The file already exists.
- *   RC_FILE_CREATION_FAILED  - The file could not be created.
  *   RC_WRITE_FAILED          - Writing zeroed page to file failed.
  *   RC_OK                    - Operation was successful.
  */
