@@ -116,31 +116,10 @@ make clean
 
 ## Contributions
 
-- Neil
-extern RC initRecordManager (void *mgmtData);
-extern RC shutdownRecordManager ();
-extern RC createTable (char *name, Schema *schema);
-extern RC openTable (RM_TableData *rel, char *name);
-extern RC closeTable (RM_TableData *rel);
-extern RC deleteTable (char *name);
-extern int getNumTuples (RM_TableData *rel);
+- Neil Initialization & Shutdown; Table Management
 
-- Brandon
-extern RC insertRecord (RM_TableData *rel, Record *record);
-extern RC deleteRecord (RM_TableData *rel, RID id);
-extern RC updateRecord (RM_TableData *rel, Record *record);
-extern RC getRecord (RM_TableData *rel, RID id, Record *record);
-extern RC startScan (RM_TableData *rel, RM_ScanHandle *scan, Expr *cond);
-extern RC next (RM_ScanHandle *scan, Record *record);
-extern RC closeScan (RM_ScanHandle *scan);
+- Brandon Record Operations; Scanning
 
-- Jinzhao
-extern int getRecordSize (Schema *schema);
-extern Schema *createSchema (int numAttr, char **attrNames, DataType *dataTypes, int *typeLength, int keySize, int *keys);
-extern RC freeSchema (Schema *schema);
-extern RC createRecord (Record **record, Schema *schema);
-extern RC freeRecord (Record *record);
-extern RC getAttr (Record *record, Schema *schema, int attrNum, Value **value);
-extern RC setAttr (Record *record, Schema *schema, int attrNum, Value *value);
+- Jinzhao Schema & Record Utilities; Documentation
 
 
