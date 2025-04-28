@@ -39,9 +39,8 @@ Stores state for an active scan:
 RC initRecordManager(void *mgmtData);
 RC shutdownRecordManager(void);
 ```
-
-- initRecordManager — Sets up any global state (no-op in this implementation).
-- shutdownRecordManager — Cleans up the record manager (no-op).
+- initRecordManager — Initializes the record manager. 
+- shutdownRecordManager — Shuts down the record manager. Called when the record manager is no longer needed.
 
 ### Table Management
 
@@ -52,12 +51,11 @@ RC closeTable(RM_TableData *rel);
 RC deleteTable(char *name);
 int getNumTuples(RM_TableData *rel);
 ```
-
-- createTable — Creates a new page file and writes schema and metadata to the first page.
-- openTable — Initializes RM_TableData, loads metadata into RMTableMgmtData, and pins the metadata page.
-- closeTable — Updates metadata (tuple count), flushes dirty metadata, and shuts down the buffer pool.
-- deleteTable — Destroys the underlying page file.
-- getNumTuples — Returns the current total record count.
+- createTable — Creates a new table with the given name and schema. Creates a new page file and initializes the first page with table metadata including the schema.
+- openTable — Opens an existing table for operations. Initializes the buffer pool and loads table metadata into memory.
+- closeTable — Closes an open table, writing back any updated metadata and shutting down the buffer pool.
+- deleteTable — Deletes a table and its associated page file.
+- getNumTuples — Returns the total number of records present in the table.
 
 ### Record Operations
 
@@ -67,11 +65,10 @@ RC deleteRecord(RM_TableData *rel, RID id);
 RC updateRecord(RM_TableData *rel, Record *record);
 RC getRecord(RM_TableData *rel, RID id, Record *record);
 ```
-
-- insertRecord — Finds a free slot, writes the record, marks the page dirty, and updates tuple count.
-- deleteRecord — Pins the page, writes a tombstone ('$'), decrements tuple count, and marks dirty.
-- updateRecord — Overwrites an existing record’s data and marks the page dirty.
-- getRecord — Retrieves record data into the provided Record structure.
+- insertRecord — Pins the next free page, finds a slot, writes the record (updating RID), marks the page dirty, unpins it, and increments tuple count.
+- deleteRecord — Pins the record’s page, replaces '#' with '$', decrements tuple count, marks the page dirty, and unpins it.
+- updateRecord — Pins the record’s page, updates its data, marks the page dirty, and unpins it.
+- getRecord — Pins the record’s page, verifies the '#' marker, copies data into the Record structure, and unpins it.
 
 ### Scanning
 
@@ -80,7 +77,6 @@ RC startScan(RM_TableData *rel, RM_ScanHandle *scan, Expr *cond);
 RC next(RM_ScanHandle *scan, Record *record);
 RC closeScan(RM_ScanHandle *scan);
 ```
-
 - startScan — Initializes scan state at the first data page and slot, with an optional condition.
 - next — Iterates through pages and slots, evaluates the condition, and returns the next matching record.
 - closeScan — Unpins any pinned pages and frees scan management data.
@@ -97,7 +93,6 @@ RC determineAttributeOffsetInRecord(Schema *schema, int attrNum, int *result);
 RC getAttr(Record *record, Schema *schema, int attrNum, Value **value);
 RC setAttr(Record *record, Schema *schema, int attrNum, Value *value);
 ```
-
 - getRecordSize — Computes the byte size of a record given its schema.
 - createSchema / freeSchema — Allocate and deallocate Schema structures.
 - createRecord / freeRecord — Allocate and deallocate Record instances.
