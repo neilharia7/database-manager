@@ -113,7 +113,7 @@ To compile and test the Record Manager on test_expr
 (need to change filename Makefile_expr to Makefile first)
 ```bash
 make
-./test_program_expr  # runs unit tests for record manager
+./test_program_expr 
 make clean
 ```
 
