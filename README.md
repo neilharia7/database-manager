@@ -87,6 +87,7 @@ For record manager
 ```bash
 
 cd buffer_manager && make && ./test_program_3
+make -f Makefile_expr && ./test_program_expr
 make clean
 ```
 
