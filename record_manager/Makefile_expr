@@ -3,7 +3,7 @@ CC = gcc
 CFLAGS = -g -Wall
 
 # Source files
-SRCS = test_expr.c expr.c record_mgr.c tables.c test_helper.c dberror.c storage_mgr.c buffer_mgr.c buffer_mgr_stat.c rm_serializer.c
+SRCS = record_mgr.c expr.c rm_serializer.c buffer_mgr.c buffer_mgr_stat.c dberror.c storage_mgr.c test_expr.c
 
 # Object files
 OBJS = $(SRCS:.c=.o)
@@ -16,12 +16,12 @@ all: $(EXEC)
 
 # Link object files to create the final executable
 $(EXEC): $(OBJS)
-    $(CC) $(OBJS) -o $(EXEC)
+	$(CC) $(OBJS) -o $(EXEC)
 
 # Compile .c to .o
 %.o: %.c
-    $(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 # Clean up
 clean:
-    rm -f $(OBJS) $(EXEC)
+	rm -f $(OBJS) $(EXEC)
